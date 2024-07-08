@@ -11,27 +11,32 @@ check_requirements("shapely>=2.0.0")
 
 from shapely.geometry import LineString, Point, Polygon
 
+import pandas as pd
+
 
 class ObjectCounter:
     """A class to manage the counting of objects in a real-time video stream based on their tracks."""
 
     def __init__(
-        self,
-        classes_names,
-        reg_pts=None,
-        count_reg_color=(255, 0, 255),
-        count_txt_color=(0, 0, 0),
-        count_bg_color=(255, 255, 255),
-        line_thickness=2,
-        track_thickness=2,
-        view_img=False,
-        view_in_counts=True,
-        view_out_counts=True,
-        draw_tracks=False,
-        track_color=None,
-        region_thickness=5,
-        line_dist_thresh=15,
-        cls_txtdisplay_gap=50,
+            self,
+            classes_names,
+            reg_pts=None,
+            count_reg_color=(255, 0, 255),
+            count_txt_color=(0, 0, 0),
+            count_bg_color=(255, 255, 255),
+            line_thickness=2,
+            track_thickness=2,
+            view_img=False,
+            view_in_counts=True,
+            view_out_counts=True,
+            draw_tracks=False,
+            track_color=None,
+            region_thickness=5,
+            line_dist_thresh=15,
+            cls_txtdisplay_gap=50,
+            mask=None,
+            fps=None,
+            dist=None
     ):
         """
         Initializes the ObjectCounter with various tracking and counting parameters.
@@ -87,11 +92,22 @@ class ObjectCounter:
         self.cls_txtdisplay_gap = cls_txtdisplay_gap
         self.fontsize = 0.6
 
-        # Tracks info
         self.track_history = defaultdict(list)
         self.track_thickness = track_thickness
         self.draw_tracks = draw_tracks
         self.track_color = track_color
+
+        # Object Speed Information
+        self.mask = mask
+        self.frame_num = 0
+        self.temp = pd.DataFrame(columns=['id', 'class', 'start_region', 'startTime', 'cx', 'cy', 'life'])
+        self.history = pd.DataFrame(columns=['id', 'class', 'start_region', 'finish_region', 'speed'])
+        self.temp.set_index("id", inplace=True)
+        self.history.set_index("id", inplace=True)
+        self.fps = fps
+        self.dist = dist
+
+        self.current_speed = 0
 
         # Check if environment supports imshow
         self.env_check = check_imshow(warn=True)
@@ -122,9 +138,9 @@ class ObjectCounter:
         if event == cv2.EVENT_LBUTTONDOWN:
             for i, point in enumerate(self.reg_pts):
                 if (
-                    isinstance(point, (tuple, list))
-                    and len(point) >= 2
-                    and (abs(x - point[0]) < 10 and abs(y - point[1]) < 10)
+                        isinstance(point, (tuple, list))
+                        and len(point) >= 2
+                        and (abs(x - point[0]) < 10 and abs(y - point[1]) < 10)
                 ):
                     self.selected_point = i
                     self.is_drawing = True
@@ -155,10 +171,31 @@ class ObjectCounter:
 
             # Extract tracks
             for box, track_id, cls in zip(boxes, track_ids, clss):
+                track_id = int(track_id)
+                cls = int(cls)
                 # Draw bounding box
                 self.annotator.box_label(box, label=f"{self.names[cls]}#{track_id}", color=colors(int(track_id), True))
+                x1, y1, x2, y2 = box
+                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                sf = self.mask[cy, cx]
 
-                # Store class info
+                if sf != 0:
+                    if track_id not in self.temp.index or sf == self.temp.loc[track_id].start_region:
+                        self.temp.loc[track_id] = [cls, sf, self.frame_num, cx, cy, 1000]
+                    else:
+                        arrive_time = (self.frame_num - self.temp.loc[track_id].startTime) / self.fps
+                        self.history.loc[track_id] = [cls, self.temp.loc[track_id].start_region, sf,
+                                                      3.6 * self.dist / arrive_time]
+                        if len(self.history) < 100:
+                            self.current_speed = self.history.speed.median()
+                        else:
+                            self.current_speed = self.history.iloc[-100:].speed.median()
+                        self.temp.drop(track_id, inplace=True)
+
+                if len(self.temp) > 0:
+                    self.temp.life -= 1
+                    self.temp = self.temp[self.temp['life'] >= 0]
+
                 if self.names[cls] not in self.class_wise_count:
                     self.class_wise_count[self.names[cls]] = {"IN": 0, "OUT": 0}
 
@@ -233,7 +270,7 @@ class ObjectCounter:
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 return
 
-    def start_counting(self, im0, tracks):
+    def start_counting(self, im0, tracks, frame_num):
         """
         Main function to start the object counting process.
 
@@ -243,6 +280,7 @@ class ObjectCounter:
         """
         self.im0 = im0  # store image
         self.extract_and_process_tracks(tracks)  # draw region even if no objects
+        self.frame_num = frame_num
 
         if self.view_img:
             self.display_frames()
